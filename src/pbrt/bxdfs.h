@@ -23,8 +23,9 @@
 #include <cmath>
 #include <limits>
 #include <string>
-
+#include "table/brdfTable.h"  // 使用するテーブルデータをインクルード
 namespace pbrt {
+
 
 // DiffuseBxDF Definition
 class DiffuseBxDF {
@@ -927,17 +928,19 @@ class HairBxDF {
              Float beta_n, Float alpha);
     PBRT_CPU_GPU
     SampledSpectrum f(Vector3f wo, Vector3f wi, TransportMode mode) const;
+    //wo: 出射方向のベクトル。wi: 入射方向のベクトル。mode: TransportMode は、放射（Radiance）か重要性（Importance）かを決定する.髪の反射や散乱によるスペクトル（光の色と強さ）を計算します。
     PBRT_CPU_GPU
     pstd::optional<BSDFSample> Sample_f(Vector3f wo, Float uc, Point2f u,
                                         TransportMode mode,
                                         BxDFReflTransFlags sampleFlags) const;
+    //uc や u は、乱数によってランダムなサンプリングを行うために使用されます。返り値は、サンプリングされた反射方向やそれに対応する反射強度を示す BSDFSample オブジェクトです。
     PBRT_CPU_GPU
     Float PDF(Vector3f wo, Vector3f wi, TransportMode mode,
               BxDFReflTransFlags sampleFlags) const;
-
+    //光が特定の方向に反射または散乱する確率を計算します。
     PBRT_CPU_GPU
     void Regularize() {}
-
+    //このメソッドは現状では何も行いませんが、必要に応じて髪の物理特性を正規化するために使用される可能性があります。
     PBRT_CPU_GPU
     static constexpr const char *Name() { return "HairBxDF"; }
     std::string ToString() const;
@@ -947,15 +950,17 @@ class HairBxDF {
 
     PBRT_CPU_GPU
     static RGBUnboundedSpectrum SigmaAFromConcentration(Float ce, Float cp);
+    //このメソッドは、髪の色素濃度（ユーメラニンやフェオメラニン）に基づいて、光の吸収係数 sigma_a を計算します。ce はユーメラニンの濃度を表し、髪の黒や茶色の色味に影響します。cp はフェオメラニンの濃度を表し、赤や黄色の色味に影響します。
     PBRT_CPU_GPU
     static SampledSpectrum SigmaAFromReflectance(const SampledSpectrum &c, Float beta_n,
                                                  const SampledWavelengths &lambda);
+    //髪の反射特性に基づいて吸収係数 sigma_a を計算します。反射率から吸収特性を逆算する際に使われます。
 
-  private:
-    // HairBxDF Constants
+  public:// HairBxDF Constants
     static constexpr int pMax = 3;
 
     // HairBxDF Private Methods
+    protected://MorphoBSDFクラスで使用
     PBRT_CPU_GPU static Float Mp(Float cosTheta_i, Float cosTheta_o, Float sinTheta_i,
                                  Float sinTheta_o, Float v) {
         Float a = cosTheta_i * cosTheta_o / v, b = sinTheta_i * sinTheta_o / v;
@@ -965,6 +970,7 @@ class HairBxDF {
         DCHECK(!IsInf(mp) && !IsNaN(mp));
         return mp;
     }
+    //髪の毛のマイクロファセットの光反射を計算するための分布関数です。cosTheta_i と cosTheta_o は、それぞれ入射光と出射光の角度を表し、v は反射の広がり具合を制御します。FastExp や LogI0 などの関数を使って、髪の毛の表面での光の拡散をモデル化
 
     PBRT_CPU_GPU static pstd::array<SampledSpectrum, pMax + 1> Ap(Float cosTheta_o,
                                                                   Float eta, Float h,
@@ -989,10 +995,12 @@ class HairBxDF {
 
         return ap;
     }
-
+    //光の多重散乱を計算するためのメソッドです。光が髪の毛の内部で複数回反射・散乱する過程をシミュレートします。p は散乱の回数を表し、多重散乱のプロセスを複数の段階に分けて計算します。
+    public://Morphoで使えるようにする
     PBRT_CPU_GPU static inline Float Phi(int p, Float gamma_o, Float gamma_t) {
         return 2 * p * gamma_t - 2 * gamma_o + p * Pi;
     }
+    //散乱過程での位相変化を計算します。p は散乱の回数、gamma_o と gamma_t はそれぞれ入射光と出射光の角度に基づく位相角です。
 
     PBRT_CPU_GPU static inline Float Np(Float phi, int p, Float s, Float gamma_o,
                                         Float gamma_t) {
@@ -1005,11 +1013,14 @@ class HairBxDF {
 
         return TrimmedLogistic(dphi, s, -Pi, Pi);
     }
+    //散乱過程での角度分布を計算します。phi は角度、p は散乱の回数、s は拡散具合を制御します。
 
     PBRT_CPU_GPU
     pstd::array<Float, pMax + 1> ApPDF(Float cosTheta_o) const;
 
     // HairBxDF Private Members
+    //privateからprotectedへ
+    protected:
     Float h, eta;
     SampledSpectrum sigma_a;
     Float beta_m, beta_n;
@@ -1017,6 +1028,39 @@ class HairBxDF {
     Float s;
     Float sin2kAlpha[pMax], cos2kAlpha[pMax];
 };
+
+// MorphoBSDF クラスの宣言 (HairBxDFに基づくクラス)
+class MorphoBSDF : public HairBxDF {
+  public:
+    MorphoBSDF() = default;  // 既定のコンストラクタを追加
+    MorphoBSDF(Float h, Float eta, const SampledSpectrum &sigma_a, Float beta_m, 
+               Float beta_n, Float alpha, int wavelengthIndex);
+// Overriding the f() function to use BRDF table
+    PBRT_CPU_GPU
+    SampledSpectrum f(Vector3f wo, Vector3f wi, TransportMode mode) const;
+
+    PBRT_CPU_GPU
+    pstd::optional<BSDFSample> Sample_f(Vector3f wo, Float uc, Point2f u,
+                                        TransportMode mode, BxDFReflTransFlags sampleFlags) const;
+
+    PBRT_CPU_GPU
+    Float Pdf(Vector3f wo, Vector3f wi, TransportMode mode,
+              BxDFReflTransFlags sampleFlags) const;
+
+    PBRT_CPU_GPU
+    pstd::array<Float, pMax + 1> ApPDF(Float cosTheta_o) const;
+    PBRT_CPU_GPU
+    pstd::array<Float, pMax + 1> ComputeApPdf(Float cosTheta_o, const Vector3f &wo) const;
+
+    
+    private:
+    // MorphoBSDF Constants
+    static constexpr int pMax = 3;
+    // Private data for BRDF lookup
+    int wavelengthIndex;
+    SampledSpectrum LookupBRDFTable(int it, int ot) const;
+};
+//////////////////////////////////////////////////////////////////////////////////////////
 
 // MeasuredBxDF Definition
 class MeasuredBxDF {
@@ -1131,12 +1175,12 @@ class NormalizedFresnelBxDF {
     Float eta;
 };
 
-PBRT_CPU_GPU inline SampledSpectrum BxDF::f(Vector3f wo, Vector3f wi, TransportMode mode) const {
+inline SampledSpectrum BxDF::f(Vector3f wo, Vector3f wi, TransportMode mode) const {
     auto f = [&](auto ptr) -> SampledSpectrum { return ptr->f(wo, wi, mode); };
     return Dispatch(f);
 }
 
-PBRT_CPU_GPU inline pstd::optional<BSDFSample> BxDF::Sample_f(Vector3f wo, Float uc, Point2f u,
+inline pstd::optional<BSDFSample> BxDF::Sample_f(Vector3f wo, Float uc, Point2f u,
                                                  TransportMode mode,
                                                  BxDFReflTransFlags sampleFlags) const {
     auto sample_f = [&](auto ptr) -> pstd::optional<BSDFSample> {
@@ -1145,25 +1189,80 @@ PBRT_CPU_GPU inline pstd::optional<BSDFSample> BxDF::Sample_f(Vector3f wo, Float
     return Dispatch(sample_f);
 }
 
-PBRT_CPU_GPU inline Float BxDF::PDF(Vector3f wo, Vector3f wi, TransportMode mode,
+inline Float BxDF::PDF(Vector3f wo, Vector3f wi, TransportMode mode,
                        BxDFReflTransFlags sampleFlags) const {
     auto pdf = [&](auto ptr) { return ptr->PDF(wo, wi, mode, sampleFlags); };
     return Dispatch(pdf);
 }
 
-PBRT_CPU_GPU inline BxDFFlags BxDF::Flags() const {
+inline BxDFFlags BxDF::Flags() const {
     auto flags = [&](auto ptr) { return ptr->Flags(); };
     return Dispatch(flags);
 }
 
-PBRT_CPU_GPU inline void BxDF::Regularize() {
+inline void BxDF::Regularize() {
     auto regularize = [&](auto ptr) { ptr->Regularize(); };
     return Dispatch(regularize);
 }
 
 extern template class LayeredBxDF<DielectricBxDF, DiffuseBxDF, true>;
 extern template class LayeredBxDF<DielectricBxDF, ConductorBxDF, true>;
+/////////////////////////////////////////////////////////////////////////////////
+// General Utility Functions
+inline Float _Sqr(Float v) { return v * v; }
+template <int n>
+static Float _Pow(Float v) {
+    static_assert(n > 0, "Power can't be negative");
+    Float n2 = _Pow<n / 2>(v);
+    return n2 * n2 * _Pow<n & 1>(v);
+}
 
+template <>
+inline Float _Pow<1>(Float v) {
+    return v;
+}
+template <>
+inline Float _Pow<0>(Float v) {
+    return 1;
+}
+
+inline Float _SafeASin(Float x) {//arcsin
+    CHECK(x >= -1.0001 && x <= 1.0001);
+    return std::asin(Clamp(x, -1, 1));
+}
+
+
+
+inline Float _SafeSqrt(Float x) {
+    CHECK_GE(x, -1e-4);
+    return std::sqrt(std::max(Float(0), x));
+}
+
+// https://fgiesen.wordpress.com/2009/12/13/decoding-morton-codes/
+static uint32_t _Compact1By1(uint32_t x) {
+    // TODO: as of Haswell, the PEXT instruction could do all this in a
+    // single instruction.
+    // x = -f-e -d-c -b-a -9-8 -7-6 -5-4 -3-2 -1-0
+    x &= 0x55555555;
+    // x = --fe --dc --ba --98 --76 --54 --32 --10
+    x = (x ^ (x >> 1)) & 0x33333333;
+    // x = ---- fedc ---- ba98 ---- 7654 ---- 3210
+    x = (x ^ (x >> 2)) & 0x0f0f0f0f;
+    // x = ---- ---- fedc ba98 ---- ---- 7654 3210
+    x = (x ^ (x >> 4)) & 0x00ff00ff;
+    // x = ---- ---- ---- ---- fedc ba98 7654 3210
+    x = (x ^ (x >> 8)) & 0x0000ffff;
+    return x;
+}
+
+static Point2f _DemuxFloat(Float f) {
+    CHECK(f >= 0 && f < 1);
+    uint64_t v = f * (1ull << 32);
+    CHECK_LT(v, 0x100000000);
+    uint32_t bits[2] = {_Compact1By1(v), _Compact1By1(v >> 1)};
+    return {bits[0] / Float(1 << 16), bits[1] / Float(1 << 16)};
+}
+////////////////////////////////////////////////////////////////////////////
 }  // namespace pbrt
 
 #endif  // PBRT_BXDFS_H

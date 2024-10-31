@@ -6,7 +6,6 @@
 #define PBRT_MATERIALS_H
 
 #include <pbrt/pbrt.h>
-
 #include <pbrt/base/bssrdf.h>
 #include <pbrt/base/material.h>
 #include <pbrt/bsdf.h>
@@ -21,6 +20,8 @@
 #include <memory>
 #include <string>
 #include <type_traits>
+
+#include "table/brdfTable.h"  // 使用するテーブルデータをインクルード
 
 namespace pbrt {
 
@@ -425,6 +426,85 @@ class HairMaterial {
     FloatTexture eumelanin, pheomelanin, eta;
     FloatTexture beta_m, beta_n, alpha;
 };
+
+//ここから
+// MorphoMaterial Definition (HairMaterialに基づく)
+class MorphoMaterial {
+  public:
+    using BxDF = MorphoBSDF;
+    using BSSRDF = void;
+
+    // MorphoMaterial Public Methods
+    MorphoMaterial(SpectrumTexture sigma_a, SpectrumTexture color, FloatTexture eumelanin,
+                   FloatTexture pheomelanin, FloatTexture eta, FloatTexture beta_m,
+                   FloatTexture beta_n, FloatTexture alpha)
+        : sigma_a(sigma_a),
+          color(color),
+          eumelanin(eumelanin),
+          pheomelanin(pheomelanin),
+          eta(eta),
+          beta_m(beta_m),
+          beta_n(beta_n),
+          alpha(alpha) {}
+
+    static const char *Name() { return "MorphoMaterial"; }
+
+    template <typename TextureEvaluator>
+    PBRT_CPU_GPU bool CanEvaluateTextures(TextureEvaluator texEval) const {
+        return texEval.CanEvaluate({eumelanin, pheomelanin, eta, beta_m, beta_n, alpha},
+                                   {sigma_a, color});
+    }
+
+    template <typename TextureEvaluator>
+    PBRT_CPU_GPU MorphoBSDF GetBxDF(TextureEvaluator texEval, MaterialEvalContext ctx,
+                                    SampledWavelengths &lambda) const {
+        Float bm = std::max<Float>(1e-2, std::min<Float>(1.0, texEval(beta_m, ctx)));
+        Float bn = std::max<Float>(1e-2, std::min<Float>(1.0, texEval(beta_n, ctx)));
+        Float a = texEval(alpha, ctx);
+        Float e = texEval(eta, ctx);
+
+        SampledSpectrum sig_a;
+        if (sigma_a)
+            sig_a = ClampZero(texEval(sigma_a, ctx, lambda));
+        else if (color) {
+            SampledSpectrum c = Clamp(texEval(color, ctx, lambda), 0, 1);
+            sig_a = MorphoBSDF::SigmaAFromReflectance(c, bn, lambda);
+        } else {
+            CHECK(eumelanin || pheomelanin);
+            sig_a = MorphoBSDF::SigmaAFromConcentration(
+                        std::max(Float(0), eumelanin ? texEval(eumelanin, ctx) : 0),
+                        std::max(Float(0), pheomelanin ? texEval(pheomelanin, ctx) : 0))
+                        .Sample(lambda);
+        }
+
+        // Offset along width (similar to HairMaterial)
+        Float h = -1 + 2 * ctx.uv[1];
+        return MorphoBSDF(h, e, sig_a, bm, bn, a, /* wavelengthIndex = */ 0);
+    }
+
+    static MorphoMaterial *Create(const TextureParameterDictionary &parameters,
+                                  const FileLoc *loc, Allocator alloc);
+
+    PBRT_CPU_GPU
+    FloatTexture GetDisplacement() const { return nullptr; }
+    PBRT_CPU_GPU
+    const Image *GetNormalMap() const { return nullptr; }
+
+    template <typename TextureEvaluator>
+    PBRT_CPU_GPU void GetBSSRDF(TextureEvaluator texEval, MaterialEvalContext ctx,
+                                SampledWavelengths &lambda) const {}
+
+    PBRT_CPU_GPU static constexpr bool HasSubsurfaceScattering() { return false; }
+
+    std::string ToString() const;
+
+  private:
+    // MorphoMaterial Private Data
+    SpectrumTexture sigma_a, color;
+    FloatTexture eumelanin, pheomelanin, eta;
+    FloatTexture beta_m, beta_n, alpha;
+};
+//ここまで
 
 // DiffuseMaterial Definition
 class DiffuseMaterial {
@@ -914,7 +994,7 @@ inline BSDF Material::GetBSDF(TextureEvaluator texEval, MaterialEvalContext ctx,
 }
 
 template <typename TextureEvaluator>
-PBRT_CPU_GPU inline bool Material::CanEvaluateTextures(TextureEvaluator texEval) const {
+inline bool Material::CanEvaluateTextures(TextureEvaluator texEval) const {
     auto eval = [&](auto ptr) { return ptr->CanEvaluateTextures(texEval); };
     return Dispatch(eval);
 }
@@ -937,17 +1017,17 @@ inline BSSRDF Material::GetBSSRDF(TextureEvaluator texEval, MaterialEvalContext 
     return DispatchCPU(get);
 }
 
-PBRT_CPU_GPU inline bool Material::HasSubsurfaceScattering() const {
+inline bool Material::HasSubsurfaceScattering() const {
     auto has = [&](auto ptr) { return ptr->HasSubsurfaceScattering(); };
     return Dispatch(has);
 }
 
-PBRT_CPU_GPU inline FloatTexture Material::GetDisplacement() const {
+inline FloatTexture Material::GetDisplacement() const {
     auto disp = [&](auto ptr) { return ptr->GetDisplacement(); };
     return Dispatch(disp);
 }
 
-PBRT_CPU_GPU inline const Image *Material::GetNormalMap() const {
+inline const Image *Material::GetNormalMap() const {
     auto nmap = [&](auto ptr) { return ptr->GetNormalMap(); };
     return Dispatch(nmap);
 }

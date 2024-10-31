@@ -23,6 +23,9 @@
 #include <numeric>
 #include <string>
 
+#include <pbrt/bxdfs.h>
+#include "table/brdfTable.h"  // 使用するテーブルデータをインクルード
+
 namespace pbrt {
 
 std::string MaterialEvalContext::ToString() const {
@@ -183,6 +186,67 @@ HairMaterial *HairMaterial::Create(const TextureParameterDictionary &parameters,
                                           beta_m, beta_n, alpha);
 }
 
+// //ここから
+// MorphoMaterial::Create
+std::string MorphoMaterial::ToString() const {
+    return StringPrintf("[ MorphoMaterial sigma_a: %s color: %s eumelanin: %s "
+                        "pheomelanin: %s eta: %s beta_m: %s beta_n: %s alpha: %s ]",
+                        sigma_a, color, eumelanin, pheomelanin, eta, beta_m, beta_n,
+                        alpha);
+}
+
+MorphoMaterial *MorphoMaterial::Create(const TextureParameterDictionary &parameters,
+                                       const FileLoc *loc, Allocator alloc) {
+    //テーブルの切り替え(初期はBRDFTABLE5_1(キューティクル多層))
+    SetBRDFTable(BRDFTABLE5_1);
+    //SetBRDFTable(BRDFTABLE5_2);//キューティクル欠け
+    //SetBRDFTable(BRDFTABLE5_3);//キューティクル剥落
+    //SetBRDFTable(BRDFTABLE5_4);//キューティクル欠け+剥落
+    SpectrumTexture sigma_a =
+        parameters.GetSpectrumTextureOrNull("sigma_a", SpectrumType::Unbounded, alloc);
+    SpectrumTexture reflectance =
+        parameters.GetSpectrumTextureOrNull("reflectance", SpectrumType::Albedo, alloc);
+    if (!reflectance)
+        reflectance = parameters.GetSpectrumTextureOrNull("color", SpectrumType::Albedo, alloc);
+    FloatTexture eumelanin = parameters.GetFloatTextureOrNull("eumelanin", alloc);
+    FloatTexture pheomelanin = parameters.GetFloatTextureOrNull("pheomelanin", alloc);
+
+    if (sigma_a) {
+        if (reflectance)
+            Warning(loc, R"(Ignoring "reflectance" parameter since "sigma_a" was provided.)");
+        if (eumelanin)
+            Warning(loc, R"(Ignoring "eumelanin" parameter since "sigma_a" was provided.)");
+        if (pheomelanin)
+            Warning(loc, R"(Ignoring "pheomelanin" parameter since "sigma_a" was provided.)");
+    } else if (reflectance) {
+        if (sigma_a)
+            Warning(loc, R"(Ignoring "sigma_a" parameter since "reflectance" was provided.)");
+        if (eumelanin)
+            Warning(loc, R"(Ignoring "eumelanin" parameter since "reflectance" was provided.)");
+        if (pheomelanin)
+            Warning(loc, R"(Ignoring "pheomelanin" parameter since "reflectance" was provided.)");
+    } else if (eumelanin || pheomelanin) {
+        if (sigma_a)
+            Warning(loc, R"(Ignoring "sigma_a" parameter since "eumelanin"/"pheomelanin" was provided.)");
+        if (reflectance)
+            Warning(loc, R"(Ignoring "reflectance" parameter since "eumelanin"/"pheomelanin" was provided.)");
+    } else {
+        // デフォルト値 (茶色の髪)
+        sigma_a = alloc.new_object<SpectrumConstantTexture>(
+            alloc.new_object<RGBUnboundedSpectrum>(
+                MorphoBSDF::SigmaAFromConcentration(1.3, 0.0)));
+    }
+
+    FloatTexture eta = parameters.GetFloatTexture("eta", 1.55f, alloc);
+    FloatTexture beta_m = parameters.GetFloatTexture("beta_m", 0.3f, alloc);
+    FloatTexture beta_n = parameters.GetFloatTexture("beta_n", 0.3f, alloc);
+    FloatTexture alpha = parameters.GetFloatTexture("alpha", 2.f, alloc);
+
+    return alloc.new_object<MorphoMaterial>(sigma_a, reflectance, eumelanin, pheomelanin, eta,
+                                            beta_m, beta_n, alpha);
+}
+// //ここまで
+
 // DiffuseMaterial Method Definitions
 std::string DiffuseMaterial::ToString() const {
     return StringPrintf(
@@ -252,7 +316,7 @@ ConductorMaterial *ConductorMaterial::Create(const TextureParameterDictionary &p
 
 // CoatedDiffuseMaterial Method Definitions
 template <typename TextureEvaluator>
-PBRT_CPU_GPU CoatedDiffuseBxDF CoatedDiffuseMaterial::GetBxDF(TextureEvaluator texEval,
+CoatedDiffuseBxDF CoatedDiffuseMaterial::GetBxDF(TextureEvaluator texEval,
                                                  const MaterialEvalContext &ctx,
                                                  SampledWavelengths &lambda) const {
     // Initialize diffuse component of plastic material
@@ -283,10 +347,10 @@ PBRT_CPU_GPU CoatedDiffuseBxDF CoatedDiffuseMaterial::GetBxDF(TextureEvaluator t
 }
 
 // Explicit template instantiation
-template PBRT_CPU_GPU CoatedDiffuseBxDF CoatedDiffuseMaterial::GetBxDF(
+template CoatedDiffuseBxDF CoatedDiffuseMaterial::GetBxDF(
     BasicTextureEvaluator, const MaterialEvalContext &ctx,
     SampledWavelengths &lambda) const;
-template PBRT_CPU_GPU CoatedDiffuseBxDF CoatedDiffuseMaterial::GetBxDF(
+template CoatedDiffuseBxDF CoatedDiffuseMaterial::GetBxDF(
     UniversalTextureEvaluator, const MaterialEvalContext &ctx,
     SampledWavelengths &lambda) const;
 
@@ -343,7 +407,7 @@ CoatedDiffuseMaterial *CoatedDiffuseMaterial::Create(
 }
 
 template <typename TextureEvaluator>
-PBRT_CPU_GPU CoatedConductorBxDF CoatedConductorMaterial::GetBxDF(TextureEvaluator texEval,
+CoatedConductorBxDF CoatedConductorMaterial::GetBxDF(TextureEvaluator texEval,
                                                      const MaterialEvalContext &ctx,
                                                      SampledWavelengths &lambda) const {
     Float iurough = texEval(interfaceURoughness, ctx);
@@ -391,10 +455,10 @@ PBRT_CPU_GPU CoatedConductorBxDF CoatedConductorMaterial::GetBxDF(TextureEvaluat
                                maxDepth, nSamples);
 }
 
-template PBRT_CPU_GPU CoatedConductorBxDF CoatedConductorMaterial::GetBxDF(
+template CoatedConductorBxDF CoatedConductorMaterial::GetBxDF(
     BasicTextureEvaluator, const MaterialEvalContext &ctx,
     SampledWavelengths &lambda) const;
-template PBRT_CPU_GPU CoatedConductorBxDF CoatedConductorMaterial::GetBxDF(
+template CoatedConductorBxDF CoatedConductorMaterial::GetBxDF(
     UniversalTextureEvaluator, const MaterialEvalContext &ctx,
     SampledWavelengths &lambda) const;
 
@@ -661,6 +725,8 @@ Material Material::Create(const std::string &name,
         material = MeasuredMaterial::Create(parameters, normalMap, loc, alloc);
     else if (name == "subsurface")
         material = SubsurfaceMaterial::Create(parameters, normalMap, loc, alloc);
+    else if (name == "morpho")
+        material = MorphoMaterial::Create(parameters, loc, alloc);
     else if (name == "mix") {
         std::vector<std::string> materialNames = parameters.GetStringArray("materials");
         if (materialNames.size() != 2)

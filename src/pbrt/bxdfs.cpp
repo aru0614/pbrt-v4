@@ -22,9 +22,16 @@
 #include <pbrt/util/sampling.h>
 #include <pbrt/util/stats.h>
 
+#include <pbrt/util/spectrum.h>
 #include <unordered_map>
+#include "table/brdfTable.h"  // 使用するテーブルデータをインクルード
+
+
 
 namespace pbrt {
+inline Float RadiansToDegrees(Float radians) {
+    return radians * 180.0f / Pi;
+}
 
 std::string ToString(BxDFReflTransFlags flags) {
     if (flags == BxDFReflTransFlags::Unset)
@@ -74,7 +81,7 @@ std::string LayeredBxDF<TopBxDF, BottomBxDF, twoSided>::ToString() const {
 }
 
 // DielectricBxDF Method Definitions
-PBRT_CPU_GPU pstd::optional<BSDFSample> DielectricBxDF::Sample_f(
+pstd::optional<BSDFSample> DielectricBxDF::Sample_f(
     Vector3f wo, Float uc, Point2f u, TransportMode mode,
     BxDFReflTransFlags sampleFlags) const {
     if (eta == 1 || mfDistrib.EffectivelySmooth()) {
@@ -169,7 +176,7 @@ PBRT_CPU_GPU pstd::optional<BSDFSample> DielectricBxDF::Sample_f(
     }
 }
 
-PBRT_CPU_GPU SampledSpectrum DielectricBxDF::f(Vector3f wo, Vector3f wi, TransportMode mode) const {
+SampledSpectrum DielectricBxDF::f(Vector3f wo, Vector3f wi, TransportMode mode) const {
     if (eta == 1 || mfDistrib.EffectivelySmooth())
         return SampledSpectrum(0.f);
     // Evaluate rough dielectric BSDF
@@ -208,7 +215,7 @@ PBRT_CPU_GPU SampledSpectrum DielectricBxDF::f(Vector3f wo, Vector3f wi, Transpo
     }
 }
 
-PBRT_CPU_GPU Float DielectricBxDF::PDF(Vector3f wo, Vector3f wi, TransportMode mode,
+Float DielectricBxDF::PDF(Vector3f wo, Vector3f wi, TransportMode mode,
                           BxDFReflTransFlags sampleFlags) const {
     if (eta == 1 || mfDistrib.EffectivelySmooth())
         return 0;
@@ -272,8 +279,14 @@ std::string ConductorBxDF::ToString() const {
 }
 
 // HairBxDF Method Definitions
-PBRT_CPU_GPU HairBxDF::HairBxDF(Float h, Float eta, const SampledSpectrum &sigma_a, Float beta_m,
+HairBxDF::HairBxDF(Float h, Float eta, const SampledSpectrum &sigma_a, Float beta_m,
                    Float beta_n, Float alpha)
+// h: 髪の断面に沿った位置を示すオフセット。
+// eta: 髪の屈折率。一般的に髪の屈折率は1.55程度ですが、材質によって変わります。
+// sigma_a: 吸収特性を示すスペクトル。髪の色や光の吸収を決定します。
+// beta_m: 髪の表面の乱れ具合（長手方向）を制御します。
+// beta_n: 髪の表面の乱れ具合（法線方向）を制御します。
+// alpha: 散乱角度に影響を与えるパラメータ。
     : h(h), eta(eta), sigma_a(sigma_a), beta_m(beta_m), beta_n(beta_n) {
     CHECK(h >= -1 && h <= 1);
     CHECK(beta_m >= 0 && beta_m <= 1);
@@ -298,46 +311,49 @@ PBRT_CPU_GPU HairBxDF::HairBxDF(Float h, Float eta, const SampledSpectrum &sigma
         sin2kAlpha[i] = 2 * cos2kAlpha[i - 1] * sin2kAlpha[i - 1];
         cos2kAlpha[i] = Sqr(cos2kAlpha[i - 1]) - Sqr(sin2kAlpha[i - 1]);
     }
+    // v[0] から v[2] の計算: 髪の毛の乱れ具合を表すパラメータ v は、beta_m に基づいて計算されます。これにより、髪の毛がどの程度広がりを持って光を反射するかが決定されます。
+    // s: 髪の毛の乱れ具合に関連する定数 s も beta_n に基づいて計算されます。
+    // sin2kAlpha および cos2kAlpha: これらは散乱角度に関連する事前計算された値です。
 }
 
-PBRT_CPU_GPU SampledSpectrum HairBxDF::f(Vector3f wo, Vector3f wi, TransportMode mode) const {
-    // Compute hair coordinate system terms related to _wo_
+SampledSpectrum HairBxDF::f(Vector3f wo, Vector3f wi, TransportMode mode) const {//wo: 光がどの方向に出射するかを示します。wi: 光がどの方向から入射するかを示します。mode: TransportMode は、光の伝搬の方法（放射 Radiance か重要性 Importance）を決定します。
+    // Compute hair coordinate system terms related to _wo_(_wo_ に関連するヘア座標系の項を計算します)
     Float sinTheta_o = wo.x;
     Float cosTheta_o = SafeSqrt(1 - Sqr(sinTheta_o));
     Float phi_o = std::atan2(wo.z, wo.y);
     Float gamma_o = SafeASin(h);
 
-    // Compute hair coordinate system terms related to _wi_
+    // Compute hair coordinate system terms related to _wi_(_wi_ に関連するヘア座標系の項を計算します)
     Float sinTheta_i = wi.x;
     Float cosTheta_i = SafeSqrt(1 - Sqr(sinTheta_i));
     Float phi_i = std::atan2(wi.z, wi.y);
 
-    // Compute $\cos\,\thetat$ for refracted ray
+    // Compute $\cos\,\thetat$ for refracted ray(屈折光線の $\cos\,\thetat$ を計算します)
     Float sinTheta_t = sinTheta_o / eta;
     Float cosTheta_t = SafeSqrt(1 - Sqr(sinTheta_t));
 
-    // Compute $\gammat$ for refracted ray
+    // Compute $\gammat$ for refracted ray(屈折光線の $\gammat$ を計算します)
     Float etap = SafeSqrt(Sqr(eta) - Sqr(sinTheta_o)) / cosTheta_o;
     Float sinGamma_t = h / etap;
     Float cosGamma_t = SafeSqrt(1 - Sqr(sinGamma_t));
     Float gamma_t = SafeASin(sinGamma_t);
 
-    // Compute the transmittance _T_ of a single path through the cylinder
+    // Compute the transmittance _T_ of a single path through the cylinder(シリンダーを通過する単一パスの透過率 _T_ を計算します)
     SampledSpectrum T = Exp(-sigma_a * (2 * cosGamma_t / cosTheta_t));
 
-    // Evaluate hair BSDF
+    // Evaluate hair BSDF(ヘアBSDFを評価する)
     Float phi = phi_i - phi_o;
     pstd::array<SampledSpectrum, pMax + 1> ap = Ap(cosTheta_o, eta, h, T);
     SampledSpectrum fsum(0.);
 
-    for (int p = 0; p < pMax; ++p) {
-        // Compute $\sin\,\thetao$ and $\cos\,\thetao$ terms accounting for scales
+    for (int p = 0; p < pMax; ++p) {//散乱の計算: 多重散乱のプロセスを p ごとにループし、Ap や Mp という関数を用いて髪の毛内での光の散乱を計算します。
+        // Compute $\sin\,\thetao$ and $\cos\,\thetao$ terms accounting for scales(スケールを考慮した $\sin\,\thetao$ 項と $\cos\,\thetao$ 項を計算します)
         Float sinThetap_o, cosThetap_o;
         if (p == 0) {
             sinThetap_o = sinTheta_o * cos2kAlpha[1] - cosTheta_o * sin2kAlpha[1];
             cosThetap_o = cosTheta_o * cos2kAlpha[1] + sinTheta_o * sin2kAlpha[1];
         }
-        // Handle remainder of $p$ values for hair scale tilt
+        // Handle remainder of $p$ values for hair scale tilt(ヘアスケールの傾きに対する $p$ 値の残りを処理します)
         else if (p == 1) {
             sinThetap_o = sinTheta_o * cos2kAlpha[0] + cosTheta_o * sin2kAlpha[0];
             cosThetap_o = cosTheta_o * cos2kAlpha[0] - sinTheta_o * sin2kAlpha[0];
@@ -349,13 +365,13 @@ PBRT_CPU_GPU SampledSpectrum HairBxDF::f(Vector3f wo, Vector3f wi, TransportMode
             cosThetap_o = cosTheta_o;
         }
 
-        // Handle out-of-range $\cos\,\thetao$ from scale adjustment
+        // Handle out-of-range $\cos\,\thetao$ from scale adjustment(スケール調整による範囲外の $\cos\,\thetao$ の処理)
         cosThetap_o = std::abs(cosThetap_o);
 
         fsum += Mp(cosTheta_i, cosThetap_o, sinTheta_i, sinThetap_o, v[p]) * ap[p] *
                 Np(phi, p, s, gamma_o, gamma_t);
     }
-    // Compute contribution of remaining terms after _pMax_
+    // Compute contribution of remaining terms after _pMax_(_pMax_ 後の残りの項の寄与を計算する)
     fsum +=
         Mp(cosTheta_i, cosTheta_o, sinTheta_i, sinTheta_o, v[pMax]) * ap[pMax] / (2 * Pi);
 
@@ -365,7 +381,7 @@ PBRT_CPU_GPU SampledSpectrum HairBxDF::f(Vector3f wo, Vector3f wi, TransportMode
     return fsum;
 }
 
-PBRT_CPU_GPU pstd::array<Float, HairBxDF::pMax + 1> HairBxDF::ApPDF(Float cosTheta_o) const {
+pstd::array<Float, HairBxDF::pMax + 1> HairBxDF::ApPDF(Float cosTheta_o) const {//髪の多重散乱過程の確率密度関数 (PDF) を計算します。これにより、光が髪の毛内でどの散乱経路をたどるかの確率を決定します。
     // Initialize array of $A_p$ values for _cosTheta_o_
     Float sinTheta_o = SafeSqrt(1 - Sqr(cosTheta_o));
     // Compute $\cos\,\thetat$ for refracted ray
@@ -394,9 +410,12 @@ PBRT_CPU_GPU pstd::array<Float, HairBxDF::pMax + 1> HairBxDF::ApPDF(Float cosThe
     return apPDF;
 }
 
-PBRT_CPU_GPU pstd::optional<BSDFSample> HairBxDF::Sample_f(Vector3f wo, Float uc, Point2f u,
+pstd::optional<BSDFSample> HairBxDF::Sample_f(Vector3f wo, Float uc, Point2f u,
                                               TransportMode mode,
                                               BxDFReflTransFlags sampleFlags) const {
+    //与えられた出射方向 wo に基づいて、髪の毛内での光の散乱方向をサンプリングします。Monte Carlo サンプリングに基づいて光の挙動を決定する手法です。
+    // uc や u: サンプリング用の乱数。
+    // sampleFlags: 反射や透過のフラグ。
     // Compute hair coordinate system terms related to _wo_
     Float sinTheta_o = wo.x;
     Float cosTheta_o = SafeSqrt(1 - Sqr(sinTheta_o));
@@ -489,8 +508,9 @@ PBRT_CPU_GPU pstd::optional<BSDFSample> HairBxDF::Sample_f(Vector3f wo, Float uc
     return BSDFSample(f(wo, wi, mode), wi, pdf, Flags());
 }
 
-PBRT_CPU_GPU Float HairBxDF::PDF(Vector3f wo, Vector3f wi, TransportMode mode,
+Float HairBxDF::PDF(Vector3f wo, Vector3f wi, TransportMode mode,
                     BxDFReflTransFlags sampleFlags) const {
+    //特定の入射方向 wi に対して光が出射方向 wo に反射する確率（PDF）を計算します。光の散乱モデルに基づいて、散乱の確率を決定します。
     // TODO? flags...
 
     // Compute hair coordinate system terms related to _wo_
@@ -545,7 +565,9 @@ PBRT_CPU_GPU Float HairBxDF::PDF(Vector3f wo, Vector3f wi, TransportMode mode,
     return pdf;
 }
 
-PBRT_CPU_GPU RGBUnboundedSpectrum HairBxDF::SigmaAFromConcentration(Float ce, Float cp) {
+RGBUnboundedSpectrum HairBxDF::SigmaAFromConcentration(Float ce, Float cp) {
+    //髪の色素濃度（ユーメラニンとフェオメラニン）に基づいて吸収特性 sigma_a を計算します。ce はユーメラニンの濃度を表し、cp はフェオメラニンの濃度を表します。
+    //eumelaninSigma_a と pheomelaninSigma_a: 髪の色素による光の吸収特性を定義しています。
     RGB eumelaninSigma_a(0.419f, 0.697f, 1.37f);
     RGB pheomelaninSigma_a(0.187f, 0.4f, 1.05f);
     RGB sigma_a = ce * eumelaninSigma_a + cp * pheomelaninSigma_a;
@@ -556,8 +578,9 @@ PBRT_CPU_GPU RGBUnboundedSpectrum HairBxDF::SigmaAFromConcentration(Float ce, Fl
 #endif
 }
 
-PBRT_CPU_GPU SampledSpectrum HairBxDF::SigmaAFromReflectance(const SampledSpectrum &c, Float beta_n,
+SampledSpectrum HairBxDF::SigmaAFromReflectance(const SampledSpectrum &c, Float beta_n,
                                                 const SampledWavelengths &lambda) {
+    //髪の反射率から吸収特性 sigma_a を逆算します。髪の反射色から、光の吸収具合を推定するために使用されます。
     SampledSpectrum sigma_a;
     for (int i = 0; i < NSpectrumSamples; ++i)
         sigma_a[i] =
@@ -572,6 +595,286 @@ std::string HairBxDF::ToString() const {
         "[ HairBxDF h: %f eta: %f beta_m: %f beta_n: %f v[0]: %f s: %f sigma_a: %s ]", h,
         eta, beta_m, beta_n, v[0], s, sigma_a);
 }
+
+//ここから///////////////////////////////////////////////////////////////////////////////////////////////////////
+// MorphoBSDF Method Definitions
+MorphoBSDF::MorphoBSDF(Float h, Float eta, const SampledSpectrum &sigma_a, 
+                       Float beta_m, Float beta_n, Float alpha, int wavelengthIndex)
+    : HairBxDF(h, eta, sigma_a, beta_m, beta_n, alpha), wavelengthIndex(wavelengthIndex) {}
+
+SampledSpectrum MorphoBSDF::f(Vector3f wo, Vector3f wi, TransportMode mode) const {
+    // wo と wi から角度を計算
+    // Compute hair coordinate system terms related to _wo_(_wo_ に関連するヘア座標系の項を計算します)
+    Float sinTheta_o = wo.x;
+    Float cosTheta_o = SafeSqrt(1 - Sqr(sinTheta_o));
+    Float phi_o = std::atan2(wo.z, wo.y);
+    Float gamma_o = SafeASin(h);
+
+    // Compute hair coordinate system terms related to _wi_(_wi_ に関連するヘア座標系の項を計算します)
+    Float sinTheta_i = wi.x;
+    Float cosTheta_i = SafeSqrt(1 - Sqr(sinTheta_i));
+    Float phi_i = std::atan2(wi.z, wi.y);
+
+    // Compute $\cos\,\thetat$ for refracted ray(屈折光線の $\cos\,\thetat$ を計算します)
+    Float sinTheta_t = sinTheta_o / eta;
+    Float cosTheta_t = SafeSqrt(1 - Sqr(sinTheta_t));
+
+    // Compute $\gammat$ for refracted ray(屈折光線の $\gammat$ を計算します)
+    Float etap = SafeSqrt(Sqr(eta) - Sqr(sinTheta_o)) / cosTheta_o;
+    Float sinGamma_t = h / etap;
+    Float cosGamma_t = SafeSqrt(1 - Sqr(sinGamma_t));
+    Float gamma_t = SafeASin(sinGamma_t);
+
+    // 入射角と出射角を用いてテーブル参照を行う
+    int it = std::abs(std::round(std::atan2(wi.x, std::sqrt(wi.y * wi.y + wi.z * wi.z)) * 180 / Pi));
+    int ot = std::abs(std::round(std::atan2(wo.x, std::sqrt(wo.y * wo.y + wo.z * wo.z)) * 180 / Pi));
+
+    // 散乱光を格納するためのスペクトルを初期化
+    SampledSpectrum fsum(0.f);
+
+     // 外部テーブルデータを使用して散乱を計算
+    for (int i = 0; i < NSpectrumSamples; ++i) {
+        Float brdfValue = CurrentBRDFTable[it][ot][i] / 2.5;
+        fsum[i] = brdfValue;
+    }
+
+    // Compute the transmittance _T_ of a single path through the cylinder
+    SampledSpectrum T = Exp(-sigma_a * (2 * cosGamma_t / cosTheta_t));
+
+    // 最終的な散乱スペクトルを計算
+    fsum *= T;
+
+    // `TransportMode` に応じた追加処理
+    if (mode == TransportMode::Radiance) {
+        // 放射光（Radiance）モード向けの処理が必要ならここに追加
+        // 例: fsum *= someFactor;
+    }
+
+    // // Compute the transmittance _T_ of a single path through the cylinder(シリンダーを通過する単一パスの透過率 _T_ を計算します)
+    // SampledSpectrum T = Exp(-sigma_a * (2 * cosGamma_t / cosTheta_t));
+
+    // // Evaluate hair BSDF(ヘアBSDFを評価する)
+    // Float phi = phi_i - phi_o;
+    // pstd::array<SampledSpectrum, pMax + 1> ap = Ap(cosTheta_o, eta, h, T);
+    // SampledSpectrum fsum(0.);
+
+    // // 多重散乱プロセスをpごとにループ
+    // for (int p = 0; p < pMax; ++p) {
+    //     // pごとのsinThetaとcosThetaの計算（HairBxDFに準じる）
+    //     Float sinThetap_o, cosThetap_o;
+    //     if (p == 0) {
+    //         sinThetap_o = sinTheta_o * cos2kAlpha[1] - cosTheta_o * sin2kAlpha[1];
+    //         cosThetap_o = cosTheta_o * cos2kAlpha[1] + sinTheta_o * sin2kAlpha[1];
+    //     } else if (p == 1) {
+    //         sinThetap_o = sinTheta_o * cos2kAlpha[0] + cosTheta_o * sin2kAlpha[0];
+    //         cosThetap_o = cosTheta_o * cos2kAlpha[0] - sinTheta_o * sin2kAlpha[0];
+    //     } else if (p == 2) {
+    //         sinThetap_o = sinTheta_o * cos2kAlpha[2] + cosTheta_o * sin2kAlpha[2];
+    //         cosThetap_o = cosTheta_o * cos2kAlpha[2] - sinTheta_o * sin2kAlpha[2];
+    //     } else {
+    //         sinThetap_o = sinTheta_o;
+    //         cosThetap_o = cosTheta_o;
+    //     }
+
+    //     // 範囲外のcosThetap_oを処理
+    //     cosThetap_o = std::abs(cosThetap_o);
+
+    //     int it = std::abs(static_cast<int>(std::round(RadiansToDegrees(std::atan2(wi.x, SafeSqrt(wi.y * wi.y + wi.z * wi.z))))));
+    //     int ot = std::abs(static_cast<int>(std::round(RadiansToDegrees(std::atan2(wo.x, SafeSqrt(wo.y * wo.y + wo.z * wo.z))))));
+
+    //     // BRDFテーブルからMpを取得
+    //     SampledSpectrum Mp = LookupBRDFTable(it, ot);  // itとotを渡す
+
+    //     // apとNpを使用して散乱寄与を計算し、fsumに加算
+    //     fsum += Mp * ap[p] * Np(phi, p, s, gamma_o, gamma_t);  // apとNpの計算はHairBxDFに基づく
+    // }
+
+    // // pMax後の残りの寄与を計算
+    // fsum += Mp(cosTheta_i, cosTheta_o, sinTheta_i, sinTheta_o, v[pMax]) * ap[pMax] / (2 * Pi);
+
+    // // 入射方向に依存して正規化
+    // if (AbsCosTheta(wi) > 0) {
+    //     fsum /= AbsCosTheta(wi);
+    // }
+
+    return fsum;
+}
+
+SampledSpectrum MorphoBSDF::LookupBRDFTable(int it, int ot) const {
+    SampledSpectrum reflection(0);
+    for (int i = 0; i < NSpectrumSamples; ++i) {  // NSpectrumSamples を使用
+        reflection[i] = CurrentBRDFTable[it][ot][i] / 2.5f;
+    }
+    return reflection;
+}
+
+pstd::array<Float, MorphoBSDF::pMax + 1> MorphoBSDF::ComputeApPdf(Float cosTheta_o, const Vector3f &wo) const {
+    // _cosTheta_o_ に対応する $A_p$ の配列を計算します
+    Float sinTheta_o = SafeSqrt(1 - cosTheta_o * cosTheta_o);
+
+    // 屈折光線の $\cos \thetat$ を計算します
+    Float sinTheta_t = sinTheta_o / eta;
+    Float cosTheta_t = SafeSqrt(1 - Sqr(sinTheta_t));
+
+    // 屈折光線の $\gammat$ を計算します
+    Float etap = SafeSqrt(Sqr(eta) - Sqr(sinTheta_o)) / cosTheta_o;
+    Float sinGamma_t = h / etap;
+    Float cosGamma_t = SafeSqrt(1 - Sqr(sinGamma_t));
+
+    // シリンダーを通過する単一パスの透過率 _T_ を計算します
+    SampledSpectrum T = Exp(-sigma_a * (2 * cosGamma_t / cosTheta_t));
+
+    // $A_p$ の値を `Ap` 関数を使って計算します
+    pstd::array<SampledSpectrum, pMax + 1> ap = Ap(cosTheta_o, eta, h, T);
+
+    // 各 $A_p$ 項から $A_p$ の PDF を計算します
+    pstd::array<Float, pMax + 1> apPdf;
+    Float sumY = 0;
+    for (const SampledSpectrum &as : ap)
+        sumY += as.Average();
+    for (int i = 0; i <= pMax; ++i)
+        apPdf[i] = ap[i].Average() / sumY;
+
+    return apPdf;
+}
+
+pstd::optional<BSDFSample> MorphoBSDF::Sample_f(Vector3f wo, Float uc, Point2f u,
+                                                TransportMode mode, BxDFReflTransFlags sampleFlags) const {
+    // wo に基づいて髪の座標系の項を計算
+    Float sinTheta_o = wo.x;
+    Float cosTheta_o = SafeSqrt(1 - Sqr(sinTheta_o));
+    Float phi_o = std::atan2(wo.z, wo.y);
+    Float gamma_o = SafeASin(h);
+
+    // Ap の確率密度関数 (PDF) を計算し、どの p をサンプルするか決定
+    pstd::array<Float, pMax + 1> apPdf = ComputeApPdf(cosTheta_o, wo);
+    int p = SampleDiscrete(apPdf, uc, nullptr, &uc);
+
+    // スケールを考慮して $\sin \thetao$ と $\cos \thetao$ の項を計算
+    Float sinThetap_o, cosThetap_o;
+    if (p == 0) {
+        sinThetap_o = sinTheta_o * cos2kAlpha[1] - cosTheta_o * sin2kAlpha[1];
+        cosThetap_o = cosTheta_o * cos2kAlpha[1] + sinTheta_o * sin2kAlpha[1];
+    } else if (p == 1) {
+        sinThetap_o = sinTheta_o * cos2kAlpha[0] + cosTheta_o * sin2kAlpha[0];
+        cosThetap_o = cosTheta_o * cos2kAlpha[0] - sinTheta_o * sin2kAlpha[0];
+    } else if (p == 2) {
+        sinThetap_o = sinTheta_o * cos2kAlpha[2] + cosTheta_o * sin2kAlpha[2];
+        cosThetap_o = cosTheta_o * cos2kAlpha[2] - sinTheta_o * sin2kAlpha[2];
+    } else {
+        sinThetap_o = sinTheta_o;
+        cosThetap_o = cosTheta_o;
+    }
+
+    // テーブルからBRDFを参照するための角度を計算
+    int it = std::abs(std::round(std::atan2(wo.x, cosTheta_o) * 180 / Pi));
+    int ot = std::abs(std::round(std::atan2(sinThetap_o, cosThetap_o) * 180 / Pi));
+    
+    // Mpテーブルを参照してサンプル
+    SampledSpectrum brdfSample = LookupBRDFTable(it, ot);
+
+    // サンプルされた方向に基づき $\thetai$ を計算
+    Float cosTheta = 1 + v[p] * std::log(std::max<Float>(u[0], 1e-5) +
+                                         (1 - u[0]) * FastExp(-2 / v[p]));
+    Float sinTheta = SafeSqrt(1 - Sqr(cosTheta));
+    Float cosPhi = std::cos(2 * Pi * u[1]);
+    Float sinTheta_i = -cosTheta * sinThetap_o + sinTheta * cosPhi * cosThetap_o;
+    Float cosTheta_i = SafeSqrt(1 - Sqr(sinTheta_i));
+
+    // サンプリングされた方向 $\phi_i$ と $\Delta\phi$ を計算
+    Float dphi;
+    if (p < pMax)
+        dphi = Phi(p, gamma_o, gamma_o) + SampleTrimmedLogistic(uc, s, -Pi, Pi);
+    else
+        dphi = 2 * Pi * uc;
+
+    // サンプリングされた散乱方向 wi を計算
+    Float phi_i = phi_o + dphi;
+    Vector3f wi(sinTheta_i, cosTheta_i * std::cos(phi_i), cosTheta_i * std::sin(phi_i));
+
+    // サンプリングされた散乱方向のPDFを計算
+    Float pdf = 0;
+    for (int p = 0; p < pMax; ++p) {
+        Float sinThetap_o, cosThetap_o;
+        if (p == 0) {
+            sinThetap_o = sinTheta_o * cos2kAlpha[1] - cosTheta_o * sin2kAlpha[1];
+            cosThetap_o = cosTheta_o * cos2kAlpha[1] + sinTheta_o * sin2kAlpha[1];
+        } else if (p == 1) {
+            sinThetap_o = sinTheta_o * cos2kAlpha[0] + cosTheta_o * sin2kAlpha[0];
+            cosThetap_o = cosTheta_o * cos2kAlpha[0] - sinTheta_o * sin2kAlpha[0];
+        } else if (p == 2) {
+            sinThetap_o = sinTheta_o * cos2kAlpha[2] + cosTheta_o * sin2kAlpha[2];
+            cosThetap_o = cosTheta_o * cos2kAlpha[2] - sinTheta_o * sin2kAlpha[2];
+        } else {
+            sinThetap_o = sinTheta_o;
+            cosThetap_o = cosTheta_o;
+        }
+        pdf += Mp(cosTheta_i, cosThetap_o, sinTheta_i, sinThetap_o, v[p]) * apPdf[p] * Np(dphi, p, s, gamma_o, gamma_o);
+    }
+    pdf += Mp(cosTheta_i, cosTheta_o, sinTheta_i, sinTheta_o, v[pMax]) * apPdf[pMax] * (1 / (2 * Pi));
+
+    // BSDFSample を返す
+    return BSDFSample(f(wo, wi, mode), wi, pdf, Flags());
+}
+
+Float MorphoBSDF::Pdf(Vector3f wo, Vector3f wi, TransportMode mode,
+                      BxDFReflTransFlags sampleFlags) const {
+    // 入射方向 wo と出射方向 wi の角度を計算
+    Float sinTheta_o = wo.x;
+    Float cosTheta_o = SafeSqrt(1 - Sqr(sinTheta_o));
+    Float phi_o = std::atan2(wo.z, wo.y);
+    Float gamma_o = SafeASin(h);
+
+    Float sinTheta_i = wi.x;
+    Float cosTheta_i = SafeSqrt(1 - Sqr(sinTheta_i));
+    Float phi_i = std::atan2(wi.z, wi.y);
+
+    // 屈折に関連するパラメータを計算
+    Float etap = SafeSqrt(Sqr(eta) - Sqr(sinTheta_o)) / cosTheta_o;
+    Float sinGamma_t = h / etap;
+    Float gamma_t = SafeASin(sinGamma_t);
+
+    // Ap の確率密度関数 (PDF) を計算
+    pstd::array<Float, pMax + 1> apPDF = ComputeApPdf(cosTheta_o, wo);
+
+    // 散乱イベントに対するPDFを計算
+    Float phi = phi_i - phi_o;
+    Float pdf = 0.f;
+
+    for (int p = 0; p < pMax; ++p) {
+        // pに対応する sinTheta と cosTheta の値を計算
+        Float sinThetap_o, cosThetap_o;
+        if (p == 0) {
+            sinThetap_o = sinTheta_o * cos2kAlpha[1] - cosTheta_o * sin2kAlpha[1];
+            cosThetap_o = cosTheta_o * cos2kAlpha[1] + sinTheta_o * sin2kAlpha[1];
+        } else if (p == 1) {
+            sinThetap_o = sinTheta_o * cos2kAlpha[0] + cosTheta_o * sin2kAlpha[0];
+            cosThetap_o = cosTheta_o * cos2kAlpha[0] - sinTheta_o * sin2kAlpha[0];
+        } else if (p == 2) {
+            sinThetap_o = sinTheta_o * cos2kAlpha[2] + cosTheta_o * sin2kAlpha[2];
+            cosThetap_o = cosTheta_o * cos2kAlpha[2] - sinTheta_o * sin2kAlpha[2];
+        } else {
+            sinThetap_o = sinTheta_o;
+            cosThetap_o = cosTheta_o;
+        }
+
+        // テーブルからBRDF値を参照
+        int it = std::abs(std::round(RadiansToDegrees(std::atan2(wi.x, cosTheta_i))));
+        int ot = std::abs(std::round(RadiansToDegrees(std::atan2(wo.x, cosTheta_o))));
+
+        SampledSpectrum Mp = LookupBRDFTable(it, ot);  // it, ot をBRDFテーブル参照に使う
+
+        // Mp と ap を使って PDF を計算
+        pdf += Mp.Average() * apPDF[p] * Np(phi, p, s, gamma_o, gamma_t);
+    }
+
+    // pMax に対応する項を追加
+    pdf += Mp(cosTheta_i, cosTheta_o, sinTheta_i, sinTheta_o, v[pMax]) * apPDF[pMax] * (1 / (2 * Pi));
+
+    return pdf;
+}
+//ここまで//////////////////////////////////////////////////////////
+
 
 // *****************************************************************************
 // Tensor file I/O
@@ -996,8 +1299,7 @@ MeasuredBxDFData *MeasuredBxDF::BRDFDataFromFile(const std::string &filename,
 }
 
 // MeasuredBxDF Method Definitions
-PBRT_CPU_GPU SampledSpectrum MeasuredBxDF::f(Vector3f wo, Vector3f wi,
-                                             TransportMode mode) const {
+SampledSpectrum MeasuredBxDF::f(Vector3f wo, Vector3f wi, TransportMode mode) const {
     // Check for valid reflection configurations
     if (!SameHemisphere(wo, wi))
         return SampledSpectrum(0);
@@ -1033,7 +1335,7 @@ PBRT_CPU_GPU SampledSpectrum MeasuredBxDF::f(Vector3f wo, Vector3f wi,
            (4 * brdf->sigma.Evaluate(u_wo) * CosTheta(wi));
 }
 
-PBRT_CPU_GPU pstd::optional<BSDFSample> MeasuredBxDF::Sample_f(Vector3f wo, Float uc, Point2f u,
+pstd::optional<BSDFSample> MeasuredBxDF::Sample_f(Vector3f wo, Float uc, Point2f u,
                                                   TransportMode mode,
                                                   BxDFReflTransFlags sampleFlags) const {
     // Check flags and detect interactions in lower hemisphere
@@ -1084,7 +1386,7 @@ PBRT_CPU_GPU pstd::optional<BSDFSample> MeasuredBxDF::Sample_f(Vector3f wo, Floa
     return BSDFSample(fr, wi, pdf * lum_pdf, BxDFFlags::GlossyReflection);
 }
 
-PBRT_CPU_GPU Float MeasuredBxDF::PDF(Vector3f wo, Vector3f wi, TransportMode mode,
+Float MeasuredBxDF::PDF(Vector3f wo, Vector3f wi, TransportMode mode,
                         BxDFReflTransFlags sampleFlags) const {
     if (!(sampleFlags & BxDFReflTransFlags::Reflection))
         return 0;
@@ -1128,7 +1430,7 @@ std::string NormalizedFresnelBxDF::ToString() const {
 }
 
 // BxDF Method Definitions
-PBRT_CPU_GPU SampledSpectrum BxDF::rho(Vector3f wo, pstd::span<const Float> uc,
+SampledSpectrum BxDF::rho(Vector3f wo, pstd::span<const Float> uc,
                           pstd::span<const Point2f> u2) const {
     if (wo.z == 0)
         return {};
